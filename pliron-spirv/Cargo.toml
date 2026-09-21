@@ -21,4 +21,4 @@ thiserror = "2"
 default-features = false
 features = ["pliron"]
 path = "../rspirv"
-version = "=0.14.1"
+version = "=0.15.0"
