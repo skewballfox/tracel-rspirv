@@ -292,40 +292,358 @@ mod tools {
         process::{Command, Stdio},
     };
 
-    /// Runs `tool` with `args` on `binary`, and returns its standard output. `None` if `tool` is
-    /// not installed.
-    fn run(tool: &str, args: &[&str], binary: &[u8]) -> Option<String> {
-        let mut child = match Command::new(tool)
+    /// Runs `tool` with `args` on `binary`. Does nothing if `tool` is not installed.
+    fn run(tool: &str, args: &[&str], binary: &[u8]) {
+        let Ok(mut child) = Command::new(tool)
             .args(args)
             .arg("-")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-        {
-            Ok(child) => child,
-            Err(_) => {
-                eprintln!("{tool} is not installed; skipped");
-                return None;
-            }
+        else {
+            eprintln!("{tool} is not installed; skipped");
+            return;
         };
         child.stdin.take().unwrap().write_all(binary).unwrap();
         let output = child.wait_with_output().unwrap();
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(output.status.success(), "{tool} failed:\n{stderr}\n{stdout}");
-        Some(stdout)
     }
 
     /// Validates `binary` with `spirv-val` for the target environment `env`.
     pub(crate) fn validate(binary: &[u8], env: &str) {
         run("spirv-val", &["--target-env", env], binary);
     }
-
-    /// The disassembly of `binary` from `spirv-dis`.
-    #[allow(dead_code)]
-    pub(crate) fn disassemble(binary: &[u8]) -> Option<String> {
-        run("spirv-dis", &["--raw-id", "--no-color"], binary)
-    }
 }
 
+#[cfg(feature = "debug-info")]
+mod with_feature {
+    use super::*;
+    use pliron::{builtin::ops::FuncOp, location::Located};
+    use pliron_spirv::{
+        debug_info::{DebugInfoFormat, DebugInfoOptions},
+        ops::LineOp,
+    };
+    use tracel_rspirv::{
+        dr::{Instruction, Operand},
+        spirv::{DebugInfoOp, Op as SpirvOp, Word},
+    };
+
+    fn options(format: DebugInfoFormat) -> DebugInfoOptions {
+        let mut options = DebugInfoOptions::default();
+        options.format = format;
+        options
+    }
+
+    /// Emits and validates the test module with `options` for `version` and the target
+    /// environment `env`.
+    fn emit_valid(options: DebugInfoOptions, version: (u8, u8), env: &str) -> Module {
+        let module = emit(PlironBuilder::with_debug_info(options), version);
+        let binary = words_to_bytes(&module.assemble());
+        tools::validate(&binary, env);
+        module
+    }
+
+    /// The instructions of the functions of `module`.
+    fn function_instructions(module: &Module) -> impl Iterator<Item = &Instruction> {
+        module
+            .functions
+            .iter()
+            .flat_map(|func| func.blocks.iter())
+            .flat_map(|block| block.label.iter().chain(block.instructions.iter()))
+    }
+
+    /// All instructions of `module` that are `op` of `NonSemantic.Shader.DebugInfo.100`.
+    fn debug_instructions(module: &Module, op: DebugInfoOp) -> Vec<&Instruction> {
+        module
+            .types_global_values
+            .iter()
+            .chain(function_instructions(module))
+            .filter(|inst| is_debug(inst, op))
+            .collect()
+    }
+
+    fn is_debug(inst: &Instruction, op: DebugInfoOp) -> bool {
+        inst.class.opcode == SpirvOp::ExtInst && inst.operands[1] == Operand::LiteralExtInstInteger(op as u32)
+    }
+
+    /// The `IdRef` operand `index` of the extended instruction `inst`, after the set and the
+    /// opcode.
+    fn id_operand(inst: &Instruction, index: usize) -> Option<Word> {
+        match inst.operands.get(index + 2) {
+            Some(Operand::IdRef(id)) => Some(*id),
+            _ => None,
+        }
+    }
+
+    fn definition(module: &Module, id: Word) -> &Instruction {
+        module
+            .types_global_values
+            .iter()
+            .chain(module.debug_string_source.iter())
+            .find(|inst| inst.result_id == Some(id))
+            .unwrap_or_else(|| panic!("No definition of %{id}"))
+    }
+
+    fn string(module: &Module, id: Word) -> &str {
+        match &definition(module, id).operands[0] {
+            Operand::LiteralString(text) => text,
+            operand => panic!("%{id} is not a string: {operand:?}"),
+        }
+    }
+
+    fn constant(module: &Module, id: Word) -> u32 {
+        match definition(module, id).operands[0] {
+            Operand::LiteralBit32(value) => value,
+            ref operand => panic!("%{id} is not a constant: {operand:?}"),
+        }
+    }
+
+    /// The name of the `DebugFunction` `id`.
+    fn function_name(module: &Module, id: Word) -> &str {
+        string(module, id_operand(definition(module, id), 0).unwrap())
+    }
+
+    fn has_extension(module: &Module, name: &str) -> bool {
+        module
+            .extensions
+            .iter()
+            .any(|inst| inst.operands == [Operand::LiteralString(name.to_string())])
+    }
+
+    /// The frames of a `DebugScope`, innermost first, as function names and lines.
+    fn scope_frames(module: &Module, scope: &Instruction) -> Vec<(String, Option<u32>)> {
+        let mut frames = vec![(function_name(module, id_operand(scope, 0).unwrap()).to_string(), None)];
+        let mut inlined = id_operand(scope, 1);
+        while let Some(id) = inlined {
+            let inlined_at = definition(module, id);
+            assert!(is_debug(inlined_at, DebugInfoOp::DebugInlinedAt));
+            let line = constant(module, id_operand(inlined_at, 0).unwrap());
+            let name = function_name(module, id_operand(inlined_at, 1).unwrap());
+            frames.push((name.to_string(), Some(line)));
+            inlined = id_operand(inlined_at, 2);
+        }
+        frames
+    }
+
+    /// `NonSemantic` gives one `DebugFunction` for the function and one for each distinct
+    /// callee, and a `DebugInlinedAt` chain for each inlined op.
+    #[test]
+    fn non_semantic_frames() {
+        let module = emit_valid(options(DebugInfoFormat::NonSemantic), (1, 6), "vulkan1.3");
+
+        let mut names = debug_instructions(&module, DebugInfoOp::DebugFunction)
+            .into_iter()
+            .map(|inst| function_name(&module, inst.result_id.unwrap()))
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        assert_eq!(names, ["inner", "kernel", "mid"]);
+
+        let mut scopes = debug_instructions(&module, DebugInfoOp::DebugScope)
+            .into_iter()
+            .map(|scope| scope_frames(&module, scope))
+            .collect::<Vec<_>>();
+        scopes.sort();
+        scopes.dedup();
+        let frame = |name: &str, line: Option<u32>| (name.to_string(), line);
+        assert_eq!(
+            scopes,
+            [
+                vec![frame("inner", None), frame("mid", Some(7)), frame("kernel", Some(8))],
+                vec![frame("inner", None), frame("mid", Some(7)), frame("kernel", Some(12))],
+                vec![frame("kernel", None)],
+                vec![frame("mid", None), frame("kernel", Some(8))],
+            ]
+        );
+
+        assert_eq!(
+            debug_instructions(&module, DebugInfoOp::DebugFunctionDefinition).len(),
+            1
+        );
+        assert_eq!(debug_instructions(&module, DebugInfoOp::DebugEntryPoint).len(), 1);
+        assert_eq!(debug_instructions(&module, DebugInfoOp::DebugCompilationUnit).len(), 1);
+        // The op without a location has no line.
+        assert_eq!(debug_instructions(&module, DebugInfoOp::DebugNoLine).len(), 1);
+        assert!(!function_instructions(&module).any(|inst| inst.class.opcode == SpirvOp::Line));
+        assert!(!has_extension(&module, "SPV_KHR_non_semantic_info"));
+    }
+
+    /// Below SPIR-V 1.6, `NonSemantic` adds the extension for non-semantic instruction sets.
+    #[test]
+    fn non_semantic_spirv_1_3_has_extension() {
+        let module = emit_valid(options(DebugInfoFormat::NonSemantic), (1, 3), "vulkan1.1");
+        assert!(has_extension(&module, "SPV_KHR_non_semantic_info"));
+    }
+
+    /// The `DebugSource` of a file gets the text of the options. A long text continues in
+    /// `DebugSourceContinued`. The directory of the options goes before relative file names.
+    #[test]
+    fn non_semantic_source_text_and_directory() {
+        let mut options = options(DebugInfoFormat::NonSemantic);
+        // `spirv-val` checks each column against the length of its line in the text.
+        let text = format!("// {}\n", "kernel ".repeat(8)).repeat(5_000);
+        options.source_text.insert("src/kernel.rs".to_string(), text.clone());
+        options.directory = "/work/".to_string();
+        let module = emit_valid(options, (1, 6), "vulkan1.3");
+
+        let sources = debug_instructions(&module, DebugInfoOp::DebugSource);
+        let mut files = sources
+            .iter()
+            .map(|inst| string(&module, id_operand(inst, 0).unwrap()))
+            .collect::<Vec<_>>();
+        files.sort_unstable();
+        assert_eq!(files, ["/work/src/kernel.rs", "/work/src/lib.rs"]);
+
+        let kernel = sources
+            .iter()
+            .find(|inst| string(&module, id_operand(inst, 0).unwrap()) == "/work/src/kernel.rs")
+            .unwrap();
+        let mut joined = string(&module, id_operand(kernel, 1).unwrap()).to_string();
+        let globals = &module.types_global_values;
+        let start = globals.iter().position(|inst| inst == *kernel).unwrap();
+        for inst in globals[start + 1..]
+            .iter()
+            .take_while(|inst| is_debug(inst, DebugInfoOp::DebugSourceContinued))
+        {
+            joined.push_str(string(&module, id_operand(inst, 0).unwrap()));
+        }
+        assert_eq!(joined, text);
+        assert_eq!(debug_instructions(&module, DebugInfoOp::DebugSourceContinued).len(), 1);
+    }
+
+    /// `OpLine` gives no `NonSemantic.Shader.DebugInfo.100` instruction.
+    #[test]
+    fn op_line_has_no_non_semantic_data() {
+        let module = emit_valid(options(DebugInfoFormat::OpLine), (1, 6), "vulkan1.3");
+        assert!(module.ext_inst_imports.is_empty());
+        assert!(function_instructions(&module).any(|inst| inst.class.opcode == SpirvOp::Line));
+        // The op without a location has no line.
+        assert!(function_instructions(&module).any(|inst| inst.class.opcode == SpirvOp::NoLine));
+        emit_valid(options(DebugInfoFormat::OpLine), (1, 3), "vulkan1.1");
+    }
+
+    /// The source line of each instruction of the functions, as `OpLine` gives it, in order.
+    fn instruction_lines(module: &Module) -> Vec<(SpirvOp, Option<(String, u32)>)> {
+        let mut lines = Vec::new();
+        for block in module.functions.iter().flat_map(|func| func.blocks.iter()) {
+            let mut current = None;
+            for inst in &block.instructions {
+                match inst.class.opcode {
+                    SpirvOp::Line => {
+                        let Operand::IdRef(file) = inst.operands[0] else {
+                            unreachable!()
+                        };
+                        let Operand::LiteralBit32(line) = inst.operands[1] else {
+                            unreachable!()
+                        };
+                        current = Some((string(module, file).to_string(), line));
+                    }
+                    SpirvOp::NoLine => current = None,
+                    opcode => lines.push((opcode, current.clone())),
+                }
+            }
+        }
+        lines
+    }
+
+    /// Gives each op without a location the location of the op before it, as cubecl does
+    /// before its `OpLine` pass.
+    fn inherit_locations(ctx: &mut Context, block: Ptr<BasicBlock>) {
+        let mut previous = Location::Unknown;
+        let ops = block.deref(ctx).iter(ctx).collect::<Vec<_>>();
+        for op in ops {
+            if op.deref(ctx).loc().is_unknown() {
+                op.deref_mut(ctx).set_loc(previous.clone());
+            }
+            previous = op.deref(ctx).loc();
+            let regions = op.deref(ctx).regions().collect::<Vec<_>>();
+            for region in regions {
+                let blocks = region.deref(ctx).iter(ctx).collect::<Vec<_>>();
+                for block in blocks {
+                    inherit_locations(ctx, block);
+                }
+            }
+        }
+    }
+
+    /// The innermost file and line of `loc`, as `cubecl_ir::debug::leaf_line` gives it.
+    fn leaf_line(ctx: &Context, loc: &Location) -> Option<(String, u32)> {
+        match loc {
+            Location::CallSite { callee, .. } => leaf_line(ctx, callee),
+            Location::Named { child_loc, .. } => leaf_line(ctx, child_loc),
+            Location::SrcPos {
+                src: Source::File(key),
+                pos,
+            } => Some((
+                pliron::uniqued_any::get(ctx, *key).display().to_string(),
+                u32::try_from(pos.line).unwrap_or(0),
+            )),
+            Location::Fused { locations, .. } => locations.iter().find_map(|loc| leaf_line(ctx, loc)),
+            _ => None,
+        }
+    }
+
+    /// The `OpLine` pass of cubecl (`cubecl-spirv/src/lines.rs` at `0b4f9c9`): a `LineOp` before
+    /// each op that is not a terminator and whose line is not the line of the op before it.
+    fn insert_line_ops(ctx: &mut Context, block: Ptr<BasicBlock>) {
+        let terminator = block.deref(ctx).get_terminator(ctx);
+        let mut current = None;
+        let ops = block.deref(ctx).iter(ctx).collect::<Vec<_>>();
+        for op in ops {
+            let loc = op.deref(ctx).loc();
+            if Some(op) != terminator
+                && let Some(line) = leaf_line(ctx, &loc)
+                && current.as_ref() != Some(&line)
+            {
+                let (file, number) = line.clone();
+                LineOp::new(ctx, file, number, 0u32)
+                    .get_operation()
+                    .insert_before(ctx, op);
+                current = Some(line);
+            }
+            if op.deref(ctx).num_regions() > 0 {
+                let regions = op.deref(ctx).regions().collect::<Vec<_>>();
+                for region in regions {
+                    let blocks = region.deref(ctx).iter(ctx).collect::<Vec<_>>();
+                    for block in blocks {
+                        insert_line_ops(ctx, block);
+                    }
+                }
+                current = None;
+            }
+        }
+    }
+
+    /// Emits the test module after cubecl's location pass, with `edit` on the function body.
+    fn emit_after_inherit(builder: PlironBuilder, edit: fn(&mut Context, Ptr<BasicBlock>)) -> Module {
+        let ctx = &mut Context::new();
+        let module = build_module(ctx, (1, 6));
+        let module_block = module.get_region(ctx).deref(ctx).get_head().unwrap();
+        let func = module_block.deref(ctx).get_head().unwrap();
+        let func = Operation::get_op::<FuncOp>(func, ctx).unwrap();
+        let blocks = func.get_region(ctx).deref(ctx).iter(ctx).collect::<Vec<_>>();
+        for block in blocks {
+            inherit_locations(ctx, block);
+            edit(ctx, block);
+        }
+        let mut builder = builder;
+        module.to_spirv(ctx, &mut builder).unwrap();
+        builder.module()
+    }
+
+    /// `OpLine` gives each instruction the same line as the `OpLine` pass of cubecl.
+    #[test]
+    fn op_line_matches_cubecl() {
+        let expected = instruction_lines(&emit_after_inherit(PlironBuilder::new(), insert_line_ops));
+        let module = emit_after_inherit(
+            PlironBuilder::with_debug_info(options(DebugInfoFormat::OpLine)),
+            |_, _| {},
+        );
+        let actual = instruction_lines(&module);
+        assert_eq!(actual, expected);
+        assert!(actual.iter().filter(|(_, line)| line.is_some()).count() > 10);
+        tools::validate(&words_to_bytes(&module.assemble()), "vulkan1.3");
+    }
+}
