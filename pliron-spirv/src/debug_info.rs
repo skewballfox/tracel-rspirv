@@ -85,6 +85,9 @@ pub struct DebugInfoOptions {
     /// The name and the version of the compiler. [`DebugInfoFormat::NonSemantic`] writes it in the
     /// `DebugEntryPoint` of each entry point.
     pub producer: String,
+    /// The command-line arguments of the compiler. [`DebugInfoFormat::NonSemantic`] writes them in
+    /// the `DebugEntryPoint` of each entry point. The default is empty.
+    pub arguments: String,
     /// The directory for relative file names. The conversion joins it to each relative file name
     /// with `/`.
     /// An empty directory keeps the file names as they are.
@@ -100,6 +103,7 @@ impl Default for DebugInfoOptions {
             format: DebugInfoFormat::default(),
             language: SourceLanguage::Unknown,
             producer: "pliron-spirv".to_string(),
+            arguments: String::new(),
             directory: String::new(),
             source_text: BTreeMap::new(),
         }
@@ -677,7 +681,7 @@ pub(crate) fn finish(builder: &mut PlironBuilder) {
         .collect::<Vec<_>>();
     if !entry_points.is_empty() {
         let signature = builder.string_ref(options.producer);
-        let arguments = builder.string_ref("");
+        let arguments = builder.string_ref(options.arguments);
         for function in entry_points {
             builder.shader_debug_entry_point(function, unit, signature, arguments);
         }
