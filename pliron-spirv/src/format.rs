@@ -298,7 +298,7 @@ pub fn canonical_syntax_parse_impl<'a>(
         }
     });
 
-    let mut opds_parsed = vec![];
+    let mut opds_parsed = Vec::with_capacity(opds.len());
 
     for parser in parsers {
         let value = spaces().with(parser).parse_stream(input).into_result()?.0;
