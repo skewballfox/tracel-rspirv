@@ -46,7 +46,6 @@ mod autogen_decorations;
 mod autogen_ops;
 
 pub mod attrs;
-#[cfg(feature = "debug-info")]
 pub mod debug_info;
 pub mod decorations;
 pub mod ext;
@@ -74,7 +73,6 @@ pub struct PlironBuilder {
     symbols: HMap<Identifier, Word>,
     blocks: HMap<(Ptr<BasicBlock>, BlockPos), Word>,
     strings: HMap<String, Word>,
-    #[cfg(feature = "debug-info")]
     debug: Option<Box<debug_info::DebugInfo>>,
 }
 
@@ -105,7 +103,6 @@ impl PlironBuilder {
 
     /// Creates a builder that converts the location of each op to debug data. `options` selects
     /// the format and the contents. See [`debug_info`] for the rules.
-    #[cfg(feature = "debug-info")]
     #[must_use]
     pub fn with_debug_info(options: debug_info::DebugInfoOptions) -> Self {
         Self {
@@ -194,9 +191,7 @@ impl PlironBuilder {
         }
     }
 
-    #[cfg_attr(not(feature = "debug-info"), allow(unused_mut))]
     pub fn module(mut self) -> Module {
-        #[cfg(feature = "debug-info")]
         debug_info::finish(&mut self);
         self.builder.module()
     }
@@ -292,7 +287,6 @@ pub(crate) fn op_to_spirv(ctx: &Context, builder: &mut PlironBuilder, op: Ptr<Op
         let error = ToSpirvError::UnsupportedOp(op.disp(ctx).to_string());
         return verify_err!(dyn_op.loc(ctx), error);
     };
-    #[cfg(feature = "debug-info")]
     if builder.debug.is_some() {
         return debug_info::convert_op(ctx, builder, op, |builder| to_spirv.to_spirv(ctx, builder));
     }
