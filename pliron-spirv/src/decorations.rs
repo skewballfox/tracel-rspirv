@@ -4,9 +4,9 @@ use alloc::boxed::Box;
 use derive_new::new;
 use pliron::{
     attribute::{AttrObj, AttributeDict},
-    combine::{Parser, attempt, choice, parser::char::char},
+    combine::{Parser, attempt, choice, optional, parser::char::char},
     irfmt::parsers,
-    parsable::{IntoParseResult, Parsable, ParseResult, StateStream, parser_combinator},
+    parsable::{Parsable, ParseResult, StateStream, parser_combinator},
     printable::Printable,
 };
 
@@ -99,42 +99,31 @@ pub fn print_decorations(ctx: &Context, attrs: &AttributeDict, f: &mut dyn core:
     Ok(())
 }
 
+/// Parses a `{key, key: value, ...}` decoration list, prefixing each key with `spirv_decoration_`.
+///
+/// # Errors
+/// Returns a parse error if the input is not a well-formed decoration list.
+///
+/// # Panics
+/// Never in practice: prefixing a parsed identifier always yields a valid identifier.
 pub fn decorations_parse<'a>(state_stream: &mut StateStream<'a>, _: ()) -> ParseResult<'a, AttributeDict> {
-    type Entry = (Identifier, AttrObj);
-
-    let unit_parse = Identifier::parser(()).map(|key| -> Entry { (key, Box::new(UnitAttr::new())) });
-    let int_parse = (
-        Identifier::parser(()),
-        parsers::spaced(char(':')),
-        parsers::int_parser(),
-    )
-        .map(|(key, _, val)| -> Entry { (key, Box::new(LiteralIntegerAttr::new(val))) });
-    let string_parse = (
-        Identifier::parser(()),
-        parsers::spaced(char(':')),
-        parsers::quoted_string_parser(),
-    )
-        .map(|(key, _, val)| -> Entry { (key, Box::new(LiteralStringAttr::new(val))) });
-    let fallback_parse = (
-        Identifier::parser(()),
-        parsers::spaced(char(':')),
-        parsers::attr_parser(),
-    )
-        .map(|(key, _, val)| (key, val));
-    let decoration_parse = choice!(
-        attempt(int_parse),
-        attempt(string_parse),
-        attempt(fallback_parse),
-        unit_parse
+    let value_parse = choice!(
+        attempt(parsers::int_parser().map(|val| -> AttrObj { Box::new(LiteralIntegerAttr::new(val)) })),
+        attempt(parsers::quoted_string_parser().map(|val| -> AttrObj { Box::new(LiteralStringAttr::new(val)) })),
+        parsers::attr_parser()
     );
-    let mut decorations_parse = parsers::delimited_list_parser('{', '}', ',', decoration_parse)
-        .map(|entries| AttributeDict(entries.into_iter().collect()));
-    let decorations = decorations_parse.parse_stream(state_stream).into_result()?.0;
-    let decorations = decorations.0.into_iter().map(|(k, v)| {
-        let ident = Identifier::try_new(alloc::format!("spirv_decoration_{k}")).unwrap();
-        (ident, v)
-    });
-    Ok(AttributeDict(decorations.collect())).into_parse_result()
+    let decoration_parse = (
+        Identifier::parser(()),
+        optional(attempt(parsers::spaced(char(':'))).with(value_parse)),
+    )
+        .map(|(key, value)| {
+            let key = Identifier::try_new(alloc::format!("spirv_decoration_{key}")).unwrap();
+            (key, value.unwrap_or_else(|| Box::new(UnitAttr::new())))
+        });
+    parsers::delimited_list_parser('{', '}', ',', decoration_parse)
+        .map(|entries| AttributeDict(entries.into_iter().collect()))
+        .parse_stream(state_stream)
+        .into()
 }
 
 pub fn decorations_parser<'a>() -> Box<dyn Parser<StateStream<'a>, Output = AttributeDict, PartialState = ()> + 'a> {

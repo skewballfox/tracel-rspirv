@@ -207,10 +207,8 @@ impl Parsable for VerCapExtAttr {
         spaced(char(',')).parse_stream(input).into_result()?;
 
         let ext = Identifier::parser(());
-        let mut exts = delimited_list_parser('[', ']', ',', ext);
-        let (extensions, _) = exts.parse_stream(input).into_result()?;
-
-        let (_, c) = spaced(char('>')).parse_stream(input).into_result()?;
+        let mut exts = delimited_list_parser('[', ']', ',', ext).skip(spaced(char('>')));
+        let (extensions, c) = exts.parse_stream(input).into_result()?;
 
         Ok((VerCapExtAttr::new(version, capabilities, extensions), c))
     }
