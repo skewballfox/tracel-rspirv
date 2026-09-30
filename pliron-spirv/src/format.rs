@@ -18,9 +18,10 @@ use pliron::{
     },
     combine::{
         Parser,
+        attempt,
         optional,
         parser::{
-            char::{char, string},
+            char::{char, spaces, string},
             combinator::no_partial,
         },
     },
@@ -248,7 +249,13 @@ pub fn canonical_syntax_parse_impl<'a>(
     wrap_op: fn(Ptr<Operation>) -> OpObj,
 ) -> ParseResult<'a, OpObj> {
     let symbol = if has_symbol() {
-        Some(symbol_parse(input, &())?.0)
+        Some(
+            spaces()
+                .with(parser_combinator(symbol_parse, &()))
+                .parse_stream(input)
+                .into_result()?
+                .0,
+        )
     } else {
         None
     };
@@ -269,7 +276,7 @@ pub fn canonical_syntax_parse_impl<'a>(
             .boxed()
         }
         FormatVar::MemoryAccess(key, name) => {
-            let attr = (spaced(string(name)), spaced(char('='))).with(MemoryAccessAttr::parser(()));
+            let attr = attempt((spaced(string(name)), spaced(char('=')))).with(MemoryAccessAttr::parser(()));
             no_partial(optional(attr).map(|attr| {
                 let access = attr.map(|it| it.0).unwrap_or(MemoryAccess::NONE);
                 ParsedOpd::Attr((**key).clone(), MemoryAccessAttr::new(access).into())
@@ -293,16 +300,22 @@ pub fn canonical_syntax_parse_impl<'a>(
 
     let mut opds_parsed = vec![];
 
-    for mut parser in parsers {
-        let value = parser.parse_stream(input).into_result()?.0;
+    for parser in parsers {
+        let value = spaces().with(parser).parse_stream(input).into_result()?.0;
         opds_parsed.push(value);
-        optional(spaced(char(','))).parse_stream(input).into_result()?;
+        spaces().with(optional(char(','))).parse_stream(input).into_result()?;
     }
 
-    let mut ty_parse = optional(spaced(char(':')).with(delimited_list_parser('<', '>', ',', type_parser())));
+    let types = delimited_list_parser('<', '>', ',', type_parser());
+    let mut ty_parse = spaces().with(optional(char(':').with(spaced(types))));
     let ty = ty_parse.parse_stream(input).into_result()?.0.unwrap_or_default();
 
-    let decorations = spaced(decorations_parser()).parse_stream(input).into_result()?.0;
+    let decorations = spaces()
+        .with(optional(decorations_parser()))
+        .parse_stream(input)
+        .into_result()?
+        .0
+        .unwrap_or_default();
 
     let opds = opds_parsed.iter().flat_map(|opd| match opd {
         ParsedOpd::Value(value) => vec![*value],
@@ -385,7 +398,7 @@ fn labeled<'a, O: Into<ParsedOpd> + 'a>(
     sep: char,
     inner: impl Parser<StateStream<'a>, Output = O> + 'a,
 ) -> Box<dyn Parser<StateStream<'a>, Output = ParsedOpd, PartialState = ()> + 'a> {
-    let parse = (spaced(string(label)), spaced(char(sep))).with(inner);
+    let parse = attempt((spaced(string(label)), spaced(char(sep)))).with(inner);
     no_partial(parse.map(Into::into)).boxed()
 }
 

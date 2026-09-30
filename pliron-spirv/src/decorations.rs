@@ -4,7 +4,7 @@ use alloc::boxed::Box;
 use derive_new::new;
 use pliron::{
     attribute::{AttrObj, AttributeDict},
-    combine::{Parser, choice, parser::char::char},
+    combine::{Parser, attempt, choice, parser::char::char},
     irfmt::parsers,
     parsable::{IntoParseResult, Parsable, ParseResult, StateStream, parser_combinator},
     printable::Printable,
@@ -121,7 +121,12 @@ pub fn decorations_parse<'a>(state_stream: &mut StateStream<'a>, _: ()) -> Parse
         parsers::attr_parser(),
     )
         .map(|(key, _, val)| (key, val));
-    let decoration_parse = choice!(int_parse, string_parse, fallback_parse, unit_parse);
+    let decoration_parse = choice!(
+        attempt(int_parse),
+        attempt(string_parse),
+        attempt(fallback_parse),
+        unit_parse
+    );
     let mut decorations_parse = parsers::delimited_list_parser('{', '}', ',', decoration_parse)
         .map(|entries| AttributeDict(entries.into_iter().collect()));
     let decorations = decorations_parse.parse_stream(state_stream).into_result()?.0;
