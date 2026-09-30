@@ -868,6 +868,7 @@ impl ToSpirvOp for DemoteToHelperInvocationOp {
 #[pliron_op(
     name = "spirv.module",
     format = "
+    `@` attr($builtin_sym_name, $IdentifierAttr) ` `
     attr($spirv_module_addressing_model, $AddressingModelAttr) ` `
     attr($spirv_module_memory_model, $MemoryModelAttr) ` `
     opt_attr($spirv_module_vce, $VerCapExtAttr, label($requires)) ` `

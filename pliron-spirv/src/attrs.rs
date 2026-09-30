@@ -207,7 +207,7 @@ impl Parsable for VerCapExtAttr {
         spaced(char(',')).parse_stream(input).into_result()?;
 
         let ext = Identifier::parser(());
-        let mut exts = delimited_list_parser('[', ']', ',', ext);
+        let mut exts = delimited_list_parser('[', ']', ',', ext).skip(spaced(char('>')));
         let (extensions, c) = exts.parse_stream(input).into_result()?;
 
         Ok((VerCapExtAttr::new(version, capabilities, extensions), c))
@@ -239,6 +239,7 @@ impl CooperativeMatrixLayoutAttr {
 mod parse_tests {
     use alloc::string::ToString;
     use pliron::{
+        combine::{Parser, eof},
         context::Context,
         location::Source,
         parsable::{self, Parsable, state_stream_from_iterator},
@@ -255,7 +256,10 @@ mod parse_tests {
 
         let state_stream = state_stream_from_iterator(input.chars(), parsable::State::new(ctx, Source::InMemory));
 
-        let (parsed, _) = VerCapExtAttr::parser(()).parse(state_stream).expect("Should parse");
+        let (parsed, _) = VerCapExtAttr::parser(())
+            .skip(eof())
+            .parse(state_stream)
+            .expect("Should parse");
 
         assert_eq!(parsed.version, (1, 3));
         assert_eq!(parsed.capabilities, [Capability::Shader, Capability::GroupNonUniform]);
