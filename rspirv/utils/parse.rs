@@ -8,8 +8,7 @@ use pliron::{
     identifier::Identifier,
     input_err,
     input_error,
-    location::Located,
-    parsable::{IntoParseResult, Parsable, ParseResult, StateStream},
+    parsable::{IntoParseResult, Parsable, ParseResult, StateStream, StreamLocation},
 };
 
 #[derive(Debug)]
