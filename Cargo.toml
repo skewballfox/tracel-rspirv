@@ -14,9 +14,8 @@ redundant_field_names = "allow"
 
 [workspace.dependencies]
 log = { default-features = false, version = "0.4.22" }
-# The borrowed locations of pliron-org/pliron#307 are merged but not released yet.
-pliron = { git = "https://github.com/pliron-org/pliron.git", rev = "0abdb154de39cd4b8d892c1dda3d6e2da615a8d3", default-features = false }
-# pliron = { version = "0.19", default-features = false }
+# pliron = { git = "https://github.com/pliron-org/pliron.git", rev = "0abdb154de39cd4b8d892c1dda3d6e2da615a8d3", default-features = false }
+pliron = { version = "0.20", default-features = false }
 # pliron = { path = "../pliron", default-features = false }
 rstest = "0.26.1"
 strum = { version = "0.28", features = ["derive"] }
