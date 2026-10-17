@@ -45,7 +45,7 @@ use pliron::{
     combine::stream::position::SourcePosition,
     context::{Context, Ptr},
     linked_list::ContainsLinkedList,
-    location::{Located, Location, Source},
+    location::{Location, Source},
     op::{Op, op_impls},
     operation::Operation,
     result::Result,
@@ -221,25 +221,29 @@ fn frame_pos(loc: &Location) -> Option<Pos> {
     }
 }
 
-/// The location of `func`, or else the first known location in its body.
-fn function_location(ctx: &Context, func: FuncOp) -> Option<Location> {
-    Some(func.loc(ctx))
-        .filter(|loc| !loc.is_unknown())
-        .or_else(|| first_known_location(ctx, func.get_operation()))
+/// The op that gives the location of `func`: `func` if its location is known, or else the first
+/// op in its body with a known location. It is an op and not a location, so that the caller can
+/// borrow the location.
+fn function_location_op(ctx: &Context, func: FuncOp) -> Option<Ptr<Operation>> {
+    let op = func.get_operation();
+    if op.deref(ctx).loc().is_unknown() {
+        first_located_op(ctx, op)
+    } else {
+        Some(op)
+    }
 }
 
-/// The first known location of the ops in the regions of `op`, in pre-order.
-fn first_known_location(ctx: &Context, op: Ptr<Operation>) -> Option<Location> {
+/// The first op with a known location in the regions of `op`, in pre-order.
+fn first_located_op(ctx: &Context, op: Ptr<Operation>) -> Option<Ptr<Operation>> {
     op.deref(ctx)
         .regions()
         .flat_map(|region| region.deref(ctx).iter(ctx))
         .flat_map(|block| block.deref(ctx).iter(ctx))
         .find_map(|child| {
-            let loc = child.deref(ctx).loc();
-            if loc.is_unknown() {
-                first_known_location(ctx, child)
+            if child.deref(ctx).loc().is_unknown() {
+                first_located_op(ctx, child)
             } else {
-                Some(loc)
+                Some(child)
             }
         })
 }
@@ -586,11 +590,13 @@ pub(crate) fn convert_op(
     if is_terminator || (non_semantic && state.function.is_none()) {
         return convert(builder);
     }
-    let loc = op.deref(ctx).loc();
+    // The conversion reads the IR only, so the location stays borrowed while it runs.
+    let operation = op.deref(ctx);
+    let loc = operation.loc();
     let start = block_instructions(builder, block).len();
     let set_location = |builder: &mut PlironBuilder| {
         with_state(builder, |state, builder| {
-            state.set_location(ctx, builder, block, start, &loc)
+            state.set_location(ctx, builder, block, start, loc)
         })
     };
     if op.deref(ctx).num_regions() > 0 {
@@ -624,10 +630,11 @@ pub(crate) fn begin_function(ctx: &Context, builder: &mut PlironBuilder, func: F
         if !state.non_semantic() {
             return Ok(());
         }
-        let Some(loc) = function_location(ctx, func) else {
+        let Some(located) = function_location_op(ctx, func) else {
             return Ok(());
         };
-        let loc = outermost(&loc);
+        let located = located.deref(ctx);
+        let loc = outermost(located.loc());
         let symbol = func.get_symbol_name(ctx).to_string();
         let name = frame_name(loc).unwrap_or(&symbol);
         let pos = frame_pos(loc).unwrap_or(Pos::UNKNOWN);
