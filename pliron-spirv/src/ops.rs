@@ -736,9 +736,13 @@ impl ToSpirvOp for LoopOp {
             let merge_term = merge.deref(ctx).get_terminator(ctx).expect("Should have terminator");
             let merge_opds = merge_term.deref(ctx).operands().collect::<Vec<_>>();
             let results = self.get_operation().deref(ctx).results().collect::<Vec<_>>();
-            for (merge_opd, res) in merge_opds.into_iter().zip(results) {
-                builder.merge_values(merge_opd, res);
-            }
+            merge_opds
+                .into_iter()
+                .zip(results)
+                .into_iter()
+                .for_each(|(merge_opd, res)| {
+                    builder.merge_values(merge_opd, res);
+                });
         }
 
         let merge_label = builder.label_id(merge, BlockPos::Start);
@@ -1155,10 +1159,9 @@ pub(crate) fn block_to_spirv(
         op_to_spirv(ctx, builder, op)?;
     }
 
-    if keep_selected {
-        builder.select_block(block_id).into_pliron_result()?;
-    } else {
-        builder.select_block(None).into_pliron_result()?;
-    }
+    builder
+        .select_block(if keep_selected { block_id } else { None })
+        .into_pliron_result()?;
+
     Ok(())
 }
